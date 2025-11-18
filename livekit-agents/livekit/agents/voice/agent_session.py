@@ -39,6 +39,7 @@ from ._utils import _set_participant_attributes
 from .agent import Agent
 from .agent_activity import AgentActivity
 from .audio_recognition import _TurnDetector
+from .filler_word_handler import FillerWordHandler, FillerWordHandlerConfig
 from .events import (
     AgentEvent,
     AgentState,
@@ -88,6 +89,8 @@ class AgentSessionOptions:
     preemptive_generation: bool
     tts_text_transforms: Sequence[TextTransforms] | None
     ivr_detection: bool
+    filler_word_handler_config: FillerWordHandlerConfig | None = None
+    """Configuration for filler word filtering. If None, filler word filtering is disabled."""
 
 
 Userdata_T = TypeVar("Userdata_T")
@@ -174,6 +177,7 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         tts_text_transforms: NotGivenOr[Sequence[TextTransforms] | None] = NOT_GIVEN,
         preemptive_generation: bool = False,
         ivr_detection: bool = False,
+        filler_word_handler_config: NotGivenOr[FillerWordHandlerConfig | None] = NOT_GIVEN,
         conn_options: NotGivenOr[SessionConnectOptions] = NOT_GIVEN,
         loop: asyncio.AbstractEventLoop | None = None,
         # deprecated
@@ -281,6 +285,11 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
 
         # This is the "global" chat_context, it holds the entire conversation history
         self._chat_ctx = ChatContext.empty()
+        filler_config = (
+            filler_word_handler_config
+            if is_given(filler_word_handler_config)
+            else FillerWordHandlerConfig()
+        )
         self._opts = AgentSessionOptions(
             allow_interruptions=allow_interruptions,
             discard_audio_if_uninterruptible=discard_audio_if_uninterruptible,
@@ -303,6 +312,7 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
             use_tts_aligned_transcript=use_tts_aligned_transcript
             if is_given(use_tts_aligned_transcript)
             else None,
+            filler_word_handler_config=filler_config,
         )
         self._conn_options = conn_options or SessionConnectOptions()
         self._started = False
@@ -1172,10 +1182,18 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
                         self._agent_speaking_span, self._room_io.room.local_participant
                     )
                 # self._agent_speaking_span.set_attribute(trace_types.ATTR_START_TIME, time.time())
+            
+            # Update filler word handler with agent speaking state
+            if self._activity and hasattr(self._activity, "_filler_word_handler"):
+                self._activity._filler_word_handler.set_agent_speaking(True)
         elif self._agent_speaking_span is not None:
             # self._agent_speaking_span.set_attribute(trace_types.ATTR_END_TIME, time.time())
             self._agent_speaking_span.end()
             self._agent_speaking_span = None
+            
+            # Update filler word handler with agent speaking state
+            if self._activity and hasattr(self._activity, "_filler_word_handler"):
+                self._activity._filler_word_handler.set_agent_speaking(False)
 
         if state == "listening" and self._user_state == "listening":
             self._set_user_away_timer()

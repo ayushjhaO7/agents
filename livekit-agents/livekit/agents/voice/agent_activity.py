@@ -52,6 +52,7 @@ from .audio_recognition import (
     _EndOfTurnInfo,
     _PreemptiveGenerationInfo,
 )
+from .filler_word_handler import FillerWordHandler, FillerWordHandlerConfig
 from .events import (
     AgentFalseInterruptionEvent,
     ErrorEvent,
@@ -224,6 +225,25 @@ class AgentActivity(RecognitionHooks):
 
         # speeches that audio playout finished but not done because of tool calls
         self._background_speeches: set[SpeechHandle] = set()
+
+        # filler word handler
+        filler_config = (
+            self._session.options.filler_word_handler_config
+            if self._session.options.filler_word_handler_config
+            else None
+        )
+        if filler_config:
+            self._filler_word_handler = FillerWordHandler(self, config=filler_config)
+        else:
+            self._filler_word_handler = None
+        
+        def _update_filler_handler_state() -> None:
+            """Update filler handler state based on current speech."""
+            if self._filler_word_handler:
+                is_speaking = self._current_speech is not None and not self._current_speech.interrupted
+                self._filler_word_handler.set_agent_speaking(is_speaking)
+        
+        self._update_filler_handler_state = _update_filler_handler_state
 
     @property
     def scheduling_paused(self) -> bool:
@@ -562,9 +582,15 @@ class AgentActivity(RecognitionHooks):
                 logger.exception("failed to update the instructions")
 
         await self._resume_scheduling_task()
+        
+        # Wrap hooks with filler word handler if enabled
+        hooks = self
+        if self._filler_word_handler:
+            hooks = self._filler_word_handler
+        
         self._audio_recognition = AudioRecognition(
             self._session,
-            hooks=self,
+            hooks=hooks,
             stt=self._agent.stt_node if self.stt else None,
             vad=self.vad,
             turn_detector=self.turn_detection if not isinstance(self.turn_detection, str) else None,
@@ -1008,8 +1034,10 @@ class AgentActivity(RecognitionHooks):
                 if speech.done():
                     # skip done speech (interrupted when it's in the queue)
                     self._current_speech = None
+                    self._update_filler_handler_state()
                     continue
                 self._current_speech = speech
+                self._update_filler_handler_state()
                 if self.min_consecutive_speech_delay > 0.0:
                     await asyncio.sleep(
                         self.min_consecutive_speech_delay - (time.time() - last_playout_ts)
@@ -1018,10 +1046,12 @@ class AgentActivity(RecognitionHooks):
                     if speech.done():
                         # skip done speech (interrupted during delay)
                         self._current_speech = None
+                        self._update_filler_handler_state()
                         continue
                 speech._authorize_generation()
                 await speech._wait_for_generation()
                 self._current_speech = None
+                self._update_filler_handler_state()
                 last_playout_ts = time.time()
 
             # if we're draining/pasuing and there are no more speech tasks, we can exit.
